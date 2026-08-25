@@ -1,572 +1,169 @@
-"""
-Streamlit app for stock portfolio risk analysis visualization.
-"""
+"""Interactive Streamlit dashboard for portfolio risk analysis."""
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import model_utils
-import yfinance as yf
-import io
+from datetime import date, datetime, timedelta
 import json
 
-def main():
-    # Set page config
-    st.set_page_config(
-        page_title="Portfolio Risk Analysis",
-        page_icon="📈",
-        layout="wide"
-    )
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
-    st.title("Stock Portfolio Risk Analysis 📈")
-    st.write("Monte Carlo Simulation & Real-Time Visualization")
-    
-    try:
-        # Load model and data
-        model_obj, scaler, price_df = model_utils.load_artifacts()
-        
-        # Sidebar
-        st.sidebar.header("Portfolio Settings")
-        
-        # Date range selector
-        start_date = st.sidebar.date_input(
-            "Start Date",
-            datetime.strptime(model_obj['metadata']['start_date'], '%Y-%m-%d').date()
-        )
-        end_date = st.sidebar.date_input(
-            "End Date",
-            datetime.strptime(model_obj['metadata']['end_date'], '%Y-%m-%d').date()
-        )
-        
-        # Stock selector
-        selected_stocks = st.sidebar.multiselect(
-            "Select Stocks",
-            model_obj['metadata']['tickers'],
-            default=model_obj['metadata']['tickers']
-        )
-        
-        # Monte Carlo parameters
-        st.sidebar.header("Simulation Parameters")
-        mc_iterations = st.sidebar.slider("Monte Carlo Iterations", 1000, 20000, 10000)
-        horizon_days = st.sidebar.slider("Forecast Horizon (Days)", 5, 365, 30)
-        var_confidence = st.sidebar.slider("VaR Confidence Level", 0.9, 0.99, 0.95)
-        
-        # Portfolio weights
-        st.sidebar.header("Portfolio Weights")
-        use_equal_weights = st.sidebar.checkbox("Use Equal Weights", value=True)
-        
-        weights = []
-        if not use_equal_weights:
-            for stock in selected_stocks:
-                weight = st.sidebar.number_input(f"{stock} Weight", 0.0, 1.0, 1.0/len(selected_stocks))
-                weights.append(weight)
-            
-            # Normalize weights
-            weights = np.array(weights) / sum(weights)
-        else:
-            weights = np.array([1.0/len(selected_stocks)] * len(selected_stocks))
-        
-        # Update live data button
-        if st.sidebar.button("Update Live Data"):
-            with st.spinner("Fetching latest market data..."):
-                live_data = model_utils.fetch_data_yfinance(
-                    selected_stocks,
-                    start_date.strftime('%Y-%m-%d'),
-                    end_date.strftime('%Y-%m-%d')
-                )
-                price_df = model_utils.prepare_portfolio_dataframe(live_data)
-                st.success("Data updated successfully!")
-        
-        # Main content
-        col1, col2, col3 = st.columns(3)
-        
-        # Key metrics
-        with col1:
-            st.metric("95% VaR (30-day)", 
-                     f"{model_obj['performance']['var_95']:.2%}")
-        with col2:
-            st.metric("95% CVaR (30-day)", 
-                     f"{model_obj['performance']['cvar_95']:.2%}")
-        with col3:
-            st.metric("Prob. of >10% Loss (30-day)", 
-                     f"{model_obj['performance']['mc_stats']['prob_loss_10']:.2%}")
-        
-        # Historical Performance
-        st.header("Historical Performance")
-        fig_hist = px.line(price_df[selected_stocks], title="Portfolio Historical Prices")
-        fig_hist.update_layout(showlegend=True, height=400)
-        st.plotly_chart(fig_hist, use_container_width=True)
-        
-        # Correlation Heatmap
-        st.header("Stock Correlation Matrix")
-        corr_matrix = price_df[selected_stocks].pct_change().corr()
-        fig_corr = px.imshow(corr_matrix, title="Correlation Heatmap",
-                            color_continuous_scale='RdBu')
-        st.plotly_chart(fig_corr, use_container_width=True)
-        
-        # Monte Carlo Simulation
-        st.header("Monte Carlo Simulation")
-        
-        # Run new simulation with current parameters
-        latest_prices = price_df[selected_stocks].iloc[-1].values
-        returns_df = price_df[selected_stocks].pct_change().dropna()
-        mean_returns = returns_df.mean()
-        cov_matrix = returns_df.cov()
-        
-        portfolio_values, mc_stats = model_utils.run_monte_carlo(
-            S0=latest_prices,
-            mean_returns=mean_returns,
-            cov_matrix=cov_matrix,
-            weights=weights,
-            days=horizon_days,
-            iterations=mc_iterations
-        )
-        
-        # Plot Monte Carlo histogram
-        fig_mc = go.Figure()
-        fig_mc.add_trace(go.Histogram(x=portfolio_values, nbinsx=50,
-                                    name="Monte Carlo Distribution"))
-        fig_mc.add_vline(x=-mc_stats['var_95'], line_color='red', 
-                        annotation_text=f"95% VaR: {mc_stats['var_95']:.2%}")
-        fig_mc.update_layout(title="Monte Carlo Simulation Results",
-                            xaxis_title="30-day Return",
-                            yaxis_title="Frequency")
-        st.plotly_chart(fig_mc, use_container_width=True)
-        
-        # Future Price Predictions
-        st.header("Future Price Predictions")
-        prediction_days = st.slider("Prediction Horizon (Days)", 30, 365, 252)
-        n_simulations = st.slider("Number of Simulation Paths", 100, 2000, 1000)
-        
-        if st.button("Generate Future Predictions"):
-            with st.spinner("Generating future price predictions..."):
-                predictions = model_utils.predict_future_prices(
-                    latest_prices=latest_prices,
-                    mean_returns=mean_returns.values,
-                    cov_matrix=cov_matrix.values,
-                    days=prediction_days,
-                    simulations=n_simulations
-                )
-                
-                # Create date index for predictions
-                last_date = price_df.index[-1]
-                future_dates = pd.date_range(
-                    start=last_date,
-                    periods=prediction_days + 1,
-                    freq='B'  # Business days
-                )
-                
-                # Plot predictions for each stock
-                for i, stock in enumerate(selected_stocks):
-                    st.subheader(f"Predicted Prices for {stock}")
-                    
-                    fig = go.Figure()
-                    
-                    # Plot historical data
-                    hist_dates = price_df.index[-252:]  # Last year of historical data
-                    hist_prices = price_df[stock].iloc[-252:]
-                    fig.add_trace(go.Scatter(
-                        x=hist_dates,
-                        y=hist_prices,
-                        name="Historical",
-                        line=dict(color='blue')
-                    ))
-                    
-                    # Plot mean prediction
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['mean_path'][:, i],
-                        name="Mean Prediction",
-                        line=dict(color='green')
-                    ))
-                    
-                    # Plot confidence intervals
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['upper_95'][:, i],
-                        name="95% Upper Bound",
-                        line=dict(color='red', dash='dash')
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['lower_95'][:, i],
-                        name="95% Lower Bound",
-                        line=dict(color='red', dash='dash'),
-                        fill='tonexty'
-                    ))
-                    
-                    # Update layout
-                    fig.update_layout(
-                        title=f"{stock} Price Prediction",
-                        xaxis_title="Date",
-                        yaxis_title="Price",
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Display predicted values
-                    final_price = predictions['mean_path'][-1, i]
-                    upper_bound = predictions['upper_95'][-1, i]
-                    lower_bound = predictions['lower_95'][-1, i]
-                    
-                    pred_return = (final_price / latest_prices[i] - 1) * 100
-                    
-                    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-                    with metrics_col1:
-                        st.metric(
-                            "Predicted Final Price",
-                            f"₹{final_price:.2f}",
-                            f"{pred_return:.1f}%"
-                        )
-                    with metrics_col2:
-                        st.metric("Upper 95% Bound", f"₹{upper_bound:.2f}")
-                    with metrics_col3:
-                        st.metric("Lower 95% Bound", f"₹{lower_bound:.2f}")
-                
-                # Save predictions to CSV
-                pred_df = pd.DataFrame(
-                    predictions['mean_path'],
-                    columns=selected_stocks,
-                    index=future_dates
-                )
-                
-                st.download_button(
-                    "Download Predictions (CSV)",
-                    pred_df.to_csv(),
-                    "price_predictions.csv",
-                    "text/csv",
-                    key='download-predictions'
-                )
-                
-        # Download Report
-        st.header("Download Report")
-        
-        if st.button("Generate Report"):
-            # Create report data
-            report_data = {
-                "report_date": datetime.now().isoformat(),
-                "portfolio": {
-                    "stocks": selected_stocks,
-                    "weights": weights.tolist()
-                },
-                "risk_metrics": {
-                    "var_95": float(mc_stats['var_95']),
-                    "cvar_95": float(mc_stats['cvar_95']),
-                    "prob_loss_10": float(mc_stats['prob_loss_10']),
-                    "expected_return": float(mc_stats['mean']),
-                    "volatility": float(mc_stats['std'])
-                }
-            }
-            
-            # Convert to CSV
-            report_df = pd.DataFrame([report_data])
-            csv = report_df.to_csv(index=False)
-            
-            # Create download button
-            st.download_button(
-                "Download Report (CSV)",
-                csv,
-                "portfolio_risk_report.csv",
-                "text/csv",
-                key='download-csv'
-            )
-            
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.info("Please run train_model.py first to generate the required model artifacts.")
+import model_utils
 
-if __name__ == "__main__":
-    main()
+DEFAULT_TICKERS = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ITC.NS"]
+DEFAULT_START = date.today() - timedelta(days=365 * 4)
 
-# Set page config
-st.set_page_config(
-    page_title="Portfolio Risk Analysis",
-    page_icon="📈",
-    layout="wide"
-)
+st.set_page_config(page_title="Portfolio Risk Lab", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
-# Cache data loading
-@st.cache_data(ttl=3600)
-def load_data():
-    model_obj, scaler, price_df = model_utils.load_artifacts()
-    return model_obj, scaler, price_df
+st.markdown("""
+<style>
+.block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1400px;}
+[data-testid="stMetric"] {background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.10); padding: 18px; border-radius: 14px;}
+[data-testid="stSidebar"] {border-right: 1px solid rgba(255,255,255,.08);}
+.hero {padding: 28px 30px; border: 1px solid rgba(255,255,255,.10); border-radius: 20px; background: linear-gradient(135deg, rgba(79,70,229,.18), rgba(14,165,233,.08)); margin-bottom: 22px;}
+.hero h1 {margin: 0 0 8px 0; font-size: 2.25rem;}
+.hero p {margin: 0; opacity: .75; font-size: 1rem;}
+.section {font-size: 1.35rem; font-weight: 700; margin: 26px 0 12px;}
+.small {opacity: .65; font-size: .9rem;}
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600)
-def fetch_live_data(tickers, start_date, end_date):
-    return model_utils.fetch_data_yfinance(tickers, start_date, end_date)
+
+def make_model(tickers, start_date, end_date):
+    prices = model_utils.fetch_data_yfinance(tickers, start_date.isoformat(), (end_date + timedelta(days=1)).isoformat())
+    returns, mean_returns, cov = model_utils.compute_returns_covariance(prices)
+    return prices, returns, mean_returns, cov
+
 
 def main():
-    st.title("Stock Portfolio Risk Analysis 📈")
-    st.write("Monte Carlo Simulation & Real-Time Visualization")
-    
-    try:
-        # Load model and data
-        model_obj, scaler, price_df = load_data()
-        
-        # Sidebar
-        st.sidebar.header("Portfolio Settings")
-        
-        # Date range selector
-        start_date = st.sidebar.date_input(
-            "Start Date",
-            datetime.strptime(model_obj['metadata']['start_date'], '%Y-%m-%d').date()
-        )
-        end_date = st.sidebar.date_input(
-            "End Date",
-            datetime.strptime(model_obj['metadata']['end_date'], '%Y-%m-%d').date()
-        )
-        
-        # Stock selector
-        selected_stocks = st.sidebar.multiselect(
-            "Select Stocks",
-            model_obj['metadata']['tickers'],
-            default=model_obj['metadata']['tickers']
-        )
-        
-        # Monte Carlo parameters
-        st.sidebar.header("Simulation Parameters")
-        mc_iterations = st.sidebar.slider("Monte Carlo Iterations", 1000, 20000, 10000)
-        horizon_days = st.sidebar.slider("Forecast Horizon (Days)", 5, 365, 30)
-        var_confidence = st.sidebar.slider("VaR Confidence Level", 0.9, 0.99, 0.95)
-        
-        # Portfolio weights
-        st.sidebar.header("Portfolio Weights")
-        use_equal_weights = st.sidebar.checkbox("Use Equal Weights", value=True)
-        
+    st.markdown('<div class="hero"><h1>📊 Portfolio Risk Lab</h1><p>Monte Carlo risk analysis, correlation intelligence and probabilistic price forecasting.</p></div>', unsafe_allow_html=True)
+
+    with st.sidebar:
+        st.header("Portfolio Controls")
+        tickers = st.multiselect("Stocks", DEFAULT_TICKERS, default=DEFAULT_TICKERS)
+        start_date = st.date_input("Start date", DEFAULT_START)
+        end_date = st.date_input("End date", date.today())
+        st.divider()
+        iterations = st.slider("Monte Carlo simulations", 1_000, 20_000, 10_000, step=1_000)
+        horizon = st.slider("Risk horizon (days)", 5, 365, 30)
+        confidence = st.slider("Confidence level", 0.90, 0.99, 0.95, step=0.01)
+        st.divider()
+        equal_weights = st.checkbox("Equal portfolio weights", True)
         weights = []
-        if not use_equal_weights:
-            for stock in selected_stocks:
-                weight = st.sidebar.number_input(f"{stock} Weight", 0.0, 1.0, 1.0/len(selected_stocks))
-                weights.append(weight)
-            
-            # Normalize weights
-            weights = np.array(weights) / sum(weights)
-        else:
-            weights = np.array([1.0/len(selected_stocks)] * len(selected_stocks))
-        
-        # Update live data button
-        if st.sidebar.button("Update Live Data"):
-            with st.spinner("Fetching latest market data..."):
-                live_data = fetch_live_data(selected_stocks, start_date.strftime('%Y-%m-%d'), 
-                                        end_date.strftime('%Y-%m-%d'))
-                price_df = model_utils.prepare_portfolio_dataframe(live_data)
-                st.success("Data updated successfully!")
-        
-        # Main content
-        col1, col2, col3 = st.columns(3)
-        
-        # Key metrics
-        with col1:
-            st.metric("95% VaR (30-day)", 
-                     f"{model_obj['performance']['var_95']:.2%}")
-        with col2:
-            st.metric("95% CVaR (30-day)", 
-                     f"{model_obj['performance']['cvar_95']:.2%}")
-        with col3:
-            st.metric("Prob. of >10% Loss (30-day)", 
-                     f"{model_obj['performance']['mc_stats']['prob_loss_10']:.2%}")
-        
-        # Historical Performance
-        st.header("Historical Performance")
-        fig_hist = px.line(price_df[selected_stocks], title="Portfolio Historical Prices")
-        fig_hist.update_layout(showlegend=True, height=400)
-        st.plotly_chart(fig_hist, use_container_width=True)
-        
-        # Correlation Heatmap
-        st.header("Stock Correlation Matrix")
-        corr_matrix = price_df[selected_stocks].pct_change().corr()
-        fig_corr = px.imshow(corr_matrix, title="Correlation Heatmap",
-                            color_continuous_scale='RdBu')
-        st.plotly_chart(fig_corr, use_container_width=True)
-        
-        # Monte Carlo Simulation
-        st.header("Monte Carlo Simulation")
-        
-        # Run new simulation with current parameters
-        latest_prices = price_df[selected_stocks].iloc[-1].values
-        returns_df = price_df[selected_stocks].pct_change().dropna()
-        mean_returns = returns_df.mean()
-        cov_matrix = returns_df.cov()
-        
-        portfolio_values, mc_stats = model_utils.run_monte_carlo(
-            S0=latest_prices,
-            mean_returns=mean_returns,
-            cov_matrix=cov_matrix,
-            weights=weights,
-            days=horizon_days,
-            iterations=mc_iterations
-        )
-        
-        # Plot Monte Carlo histogram
-        fig_mc = go.Figure()
-        fig_mc.add_trace(go.Histogram(x=portfolio_values, nbinsx=50,
-                                    name="Monte Carlo Distribution"))
-        fig_mc.add_vline(x=-mc_stats['var_95'], line_color='red', 
-                        annotation_text=f"95% VaR: {mc_stats['var_95']:.2%}")
-        fig_mc.update_layout(title="Monte Carlo Simulation Results",
-                            xaxis_title="30-day Return",
-                            yaxis_title="Frequency")
-        st.plotly_chart(fig_mc, use_container_width=True)
-        
-        # Download Report
-        st.header("Download Report")
-        
-        if st.button("Generate Report"):
-            # Create report data
-            report_data = {
-                "report_date": datetime.now().isoformat(),
-                "portfolio": {
-                    "stocks": selected_stocks,
-                    "weights": weights.tolist()
-                },
-                "risk_metrics": {
-                    "var_95": float(mc_stats['var_95']),
-                    "cvar_95": float(mc_stats['cvar_95']),
-                    "prob_loss_10": float(mc_stats['prob_loss_10']),
-                    "expected_return": float(mc_stats['mean']),
-                    "volatility": float(mc_stats['std'])
-                },
-                "simulation_params": {
-                    "iterations": mc_iterations,
-                    "horizon_days": horizon_days,
-                    "confidence_level": var_confidence
-                }
-            }
-            
-            # Convert to CSV
-            report_df = pd.DataFrame([report_data])
-            csv = report_df.to_csv(index=False)
-            
-            # Create download button
-        st.download_button(
-            "Download Report (CSV)",
-            csv,
-            "portfolio_risk_report.csv",
-            "text/csv",
-            key='download-csv'
-        )
-        
-        # Future Price Predictions
-        st.header("Future Price Predictions")
-        prediction_days = st.slider("Prediction Horizon (Days)", 30, 365, 252)
-        n_simulations = st.slider("Number of Simulation Paths", 100, 2000, 1000)
-        
-        if st.button("Generate Future Predictions"):
-            with st.spinner("Generating future price predictions..."):
-                # Get the latest prices and parameters
-                latest_prices = price_df[selected_stocks].iloc[-1].values
-                returns_df = price_df[selected_stocks].pct_change().dropna()
-                mean_returns = returns_df.mean()
-                cov_matrix = returns_df.cov()
-                
-                # Generate predictions
-                predictions = model_utils.predict_future_prices(
-                    latest_prices=latest_prices,
-                    mean_returns=mean_returns.values,
-                    cov_matrix=cov_matrix.values,
-                    days=prediction_days,
-                    simulations=n_simulations
-                )
-                
-                # Create date index for predictions
-                last_date = price_df.index[-1]
-                future_dates = pd.date_range(
-                    start=last_date,
-                    periods=prediction_days + 1,
-                    freq='B'  # Business days
-                )
-                
-                # Plot predictions for each stock
-                for i, stock in enumerate(selected_stocks):
-                    st.subheader(f"Predicted Prices for {stock}")
-                    
-                    fig = go.Figure()
-                    
-                    # Plot historical data
-                    hist_dates = price_df.index[-252:]  # Last year of historical data
-                    hist_prices = price_df[stock].iloc[-252:]
-                    fig.add_trace(go.Scatter(
-                        x=hist_dates,
-                        y=hist_prices,
-                        name="Historical",
-                        line=dict(color='blue')
-                    ))
-                    
-                    # Plot mean prediction
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['mean_path'][:, i],
-                        name="Mean Prediction",
-                        line=dict(color='green')
-                    ))
-                    
-                    # Plot confidence intervals
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['upper_95'][:, i],
-                        name="95% Upper Bound",
-                        line=dict(color='red', dash='dash')
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=future_dates,
-                        y=predictions['lower_95'][:, i],
-                        name="95% Lower Bound",
-                        line=dict(color='red', dash='dash'),
-                        fill='tonexty'
-                    ))
-                    
-                    # Update layout
-                    fig.update_layout(
-                        title=f"{stock} Price Prediction",
-                        xaxis_title="Date",
-                        yaxis_title="Price",
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Display predicted values
-                    final_price = predictions['mean_path'][-1, i]
-                    upper_bound = predictions['upper_95'][-1, i]
-                    lower_bound = predictions['lower_95'][-1, i]
-                    
-                    pred_return = (final_price / latest_prices[i] - 1) * 100
-                    
-                    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-                    with metrics_col1:
-                        st.metric(
-                            "Predicted Final Price",
-                            f"₹{final_price:.2f}",
-                            f"{pred_return:.1f}%"
-                        )
-                    with metrics_col2:
-                        st.metric("Upper 95% Bound", f"₹{upper_bound:.2f}")
-                    with metrics_col3:
-                        st.metric("Lower 95% Bound", f"₹{lower_bound:.2f}")
-                        
-                # Save predictions to CSV
-                pred_df = pd.DataFrame(
-                    predictions['mean_path'],
-                    columns=selected_stocks,
-                    index=future_dates
-                )
-                
-                st.download_button(
-                    "Download Predictions (CSV)",
-                    pred_df.to_csv(),
-                    "price_predictions.csv",
-                    "text/csv",
-                    key='download-predictions'
-                )
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.info("Please run train_model.py first to generate the required model artifacts.")
+        if tickers and not equal_weights:
+            st.caption("Weights are normalized automatically.")
+            for ticker in tickers:
+                weights.append(st.number_input(ticker, min_value=0.0, max_value=1.0, value=1.0 / len(tickers), step=0.05))
+            if sum(weights) == 0:
+                st.error("At least one weight must be greater than 0.")
+                return
+            weights = np.asarray(weights, dtype=float)
+            weights /= weights.sum()
+        elif tickers:
+            weights = np.ones(len(tickers), dtype=float) / len(tickers)
+
+        refresh = st.button("🔄 Refresh market data", use_container_width=True)
+
+    if not tickers:
+        st.info("Select at least one stock from the sidebar to begin.")
+        return
+    if start_date >= end_date:
+        st.error("Start date must be earlier than end date.")
+        return
+
+    cache_key = (tuple(tickers), start_date, end_date, refresh)
+    if "market_cache" not in st.session_state or st.session_state.get("cache_key") != cache_key:
+        with st.spinner("Fetching market data and calculating risk inputs..."):
+            prices, returns, mean_returns, cov = make_model(tickers, start_date, end_date)
+        st.session_state.market_cache = (prices, returns, mean_returns, cov)
+        st.session_state.cache_key = cache_key
+    else:
+        prices, returns, mean_returns, cov = st.session_state.market_cache
+
+    latest_prices = prices.iloc[-1].to_numpy(dtype=float)
+    _, mc = model_utils.run_monte_carlo(latest_prices, mean_returns.to_numpy(), cov.to_numpy(), weights, horizon, iterations)
+    historical_var, historical_cvar = model_utils.compute_var_cvar((returns * weights).sum(axis=1), alpha=1 - confidence)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"VaR ({confidence:.0%})", f"{historical_var:.2%}", "Historical")
+    c2.metric(f"CVaR ({confidence:.0%})", f"{historical_cvar:.2%}", "Historical")
+    c3.metric(f"{horizon}D MC VaR", f"{mc['var_95']:.2%}")
+    c4.metric("Probability of >10% loss", f"{mc['prob_loss_10']:.2%}")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Performance", "🧩 Correlation", "🎲 Monte Carlo", "🔮 Forecast"])
+
+    with tab1:
+        st.markdown('<div class="section">Historical Price Performance</div>', unsafe_allow_html=True)
+        fig = px.line(prices, x=prices.index, y=tickers, template="plotly_dark")
+        fig.update_layout(height=470, margin=dict(l=10, r=10, t=25, b=10), legend_title_text="")
+        st.plotly_chart(fig, use_container_width=True)
+        returns_display = (prices.iloc[-1] / prices.iloc[0] - 1).sort_values(ascending=False)
+        st.dataframe(pd.DataFrame({"Ticker": returns_display.index, "Total Return": returns_display.values}).style.format({"Total Return": "{:.2%}"}), use_container_width=True, hide_index=True)
+
+    with tab2:
+        st.markdown('<div class="section">Return Correlation Matrix</div>', unsafe_allow_html=True)
+        corr = returns.corr()
+        fig = px.imshow(corr, text_auto=".2f", zmin=-1, zmax=1, color_continuous_scale="RdBu_r", template="plotly_dark")
+        fig.update_layout(height=520, margin=dict(l=10, r=10, t=25, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Higher positive correlation means stocks have historically tended to move together, reducing diversification benefits.")
+
+    with tab3:
+        st.markdown('<div class="section">Monte Carlo Loss Distribution</div>', unsafe_allow_html=True)
+        simulated, mc = model_utils.run_monte_carlo(latest_prices, mean_returns.to_numpy(), cov.to_numpy(), weights, horizon, iterations)
+        fig = go.Figure(go.Histogram(x=simulated, nbinsx=70, name="Simulated returns"))
+        fig.add_vline(x=-mc["var_95"], line_dash="dash", annotation_text=f"95% VaR {mc['var_95']:.2%}")
+        fig.update_layout(template="plotly_dark", height=460, xaxis_title="Portfolio return", yaxis_title="Scenarios", margin=dict(l=10, r=10, t=25, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        a, b, c = st.columns(3)
+        a.metric("Expected return", f"{mc['mean']:.2%}")
+        b.metric("Volatility", f"{mc['std']:.2%}")
+        c.metric("CVaR", f"{mc['cvar_95']:.2%}")
+
+        report = pd.DataFrame([{
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "stocks": ", ".join(tickers),
+            "horizon_days": horizon,
+            "simulations": iterations,
+            "confidence": confidence,
+            "historical_var": historical_var,
+            "historical_cvar": historical_cvar,
+            "monte_carlo_var": mc["var_95"],
+            "monte_carlo_cvar": mc["cvar_95"],
+            "probability_loss_10": mc["prob_loss_10"],
+        }])
+        st.download_button("⬇️ Download risk report", report.to_csv(index=False), "portfolio_risk_report.csv", "text/csv")
+
+    with tab4:
+        st.markdown('<div class="section">Probabilistic Price Forecast</div>', unsafe_allow_html=True)
+        prediction_days = st.slider("Forecast horizon", 30, 365, 180, key="prediction_days")
+        simulations = st.slider("Forecast paths", 100, 2_000, 1_000, step=100, key="forecast_simulations")
+        if st.button("🚀 Generate forecast", type="primary"):
+            with st.spinner("Running correlated GBM simulations..."):
+                predictions = model_utils.predict_future_prices(latest_prices, mean_returns.to_numpy(), cov.to_numpy(), prediction_days, simulations)
+            future_dates = pd.date_range(start=prices.index[-1], periods=prediction_days + 1, freq="B")
+            for i, ticker in enumerate(tickers):
+                history = prices[ticker].tail(252)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=history.index, y=history.values, name="Historical", mode="lines"))
+                fig.add_trace(go.Scatter(x=future_dates, y=predictions["upper_95"][:, i], name="95% upper", line=dict(dash="dash")))
+                fig.add_trace(go.Scatter(x=future_dates, y=predictions["lower_95"][:, i], name="95% lower", fill="tonexty", line=dict(dash="dash")))
+                fig.add_trace(go.Scatter(x=future_dates, y=predictions["mean_path"][:, i], name="Mean forecast", mode="lines"))
+                fig.update_layout(template="plotly_dark", title=ticker, height=430, hovermode="x unified", margin=dict(l=10, r=10, t=45, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+                final = predictions["mean_path"][-1, i]
+                low = predictions["lower_95"][-1, i]
+                high = predictions["upper_95"][-1, i]
+                x, y, z = st.columns(3)
+                x.metric("Expected price", f"₹{final:,.2f}", f"{(final/latest_prices[i]-1):.1%}")
+                y.metric("95% lower", f"₹{low:,.2f}")
+                z.metric("95% upper", f"₹{high:,.2f}")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        st.error(f"Dashboard error: {exc}")
+        st.info("Try a wider date range or refresh the market data.")
