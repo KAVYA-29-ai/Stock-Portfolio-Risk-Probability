@@ -1,280 +1,166 @@
-"""
-Helper functions for stock portfolio risk analysis using Monte Carlo simulation.
-Contains functions for data fetching, processing, and model management.
-"""
+"""Core utilities for the Stock Portfolio Risk Analysis application."""
 
-import os
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import joblib
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from scipy import stats
-import joblib
-from pathlib import Path
-from datetime import datetime
-from typing import List, Tuple, Dict, Union
+
+MODEL_DIR = Path("models")
+DATA_DIR = Path("data")
+MODEL_PATH = MODEL_DIR / "portfolio_model.pkl"
+SCALER_PATH = MODEL_DIR / "scaler.pkl"
+PRICE_PATH = DATA_DIR / "portfolio_data.csv"
+
 
 def fetch_data_yfinance(tickers: List[str], start: str, end: str) -> pd.DataFrame:
-    """
-    Fetch stock data from Yahoo Finance for multiple tickers.
-    
-    Args:
-        tickers (List[str]): List of stock ticker symbols
-        start (str): Start date in YYYY-MM-DD format
-        end (str): End date in YYYY-MM-DD format
-        
-    Returns:
-        pd.DataFrame: DataFrame with stock data, with ticker symbols as columns
-    """
-    # Download data for all tickers at once
+    """Download adjusted closing prices for the requested Yahoo Finance tickers."""
+    tickers = list(dict.fromkeys(tickers))
+    if not tickers:
+        raise ValueError("Select at least one stock.")
     try:
-        data = yf.download(tickers, start=start, end=end, group_by='column', auto_adjust=True)
-        
-        if isinstance(data.columns, pd.MultiIndex):
-            # If we have a multi-index, just keep the Close prices
-            close_prices = data['Close']
-        else:
-            # If single ticker, construct DataFrame with Close price
-            close_prices = pd.DataFrame(data['Close'])
-            close_prices.columns = [tickers[0]]
-        
-        # Check if we got data for all tickers
-        missing_tickers = set(tickers) - set(close_prices.columns)
-        if missing_tickers:
-            print(f"Warning: No data found for tickers: {missing_tickers}")
-        
-        if close_prices.empty or len(close_prices.columns) == 0:
-            raise ValueError("No data retrieved for any ticker")
-            
-        return close_prices
-        
-    except Exception as e:
-        raise ValueError(f"Error fetching data: {str(e)}")
+        data = yf.download(tickers=tickers, start=start, end=end, auto_adjust=True, progress=False, group_by="column")
+    except Exception as exc:
+        raise ValueError(f"Unable to fetch market data: {exc}") from exc
+    if data.empty:
+        raise ValueError("Yahoo Finance returned no data for the selected date range.")
+    if isinstance(data.columns, pd.MultiIndex):
+        if "Close" not in data.columns.get_level_values(0):
+            raise ValueError("Close prices were not returned by Yahoo Finance.")
+        prices = data["Close"].copy()
+    else:
+        if "Close" not in data.columns:
+            raise ValueError("Close prices were not returned by Yahoo Finance.")
+        prices = data[["Close"]].copy()
+        prices.columns = [tickers[0]]
+    missing = [ticker for ticker in tickers if ticker not in prices.columns]
+    if missing:
+        raise ValueError(f"No price data found for: {', '.join(missing)}")
+    prices = prices[tickers].apply(pd.to_numeric, errors="coerce")
+    return prepare_portfolio_dataframe(prices)
 
-def prepare_portfolio_dataframe(all_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean the data by handling missing values.
-    
-    Args:
-        all_data (pd.DataFrame): DataFrame with closing prices
-        
-    Returns:
-        pd.DataFrame: Clean DataFrame with closing prices
-    """
-    # Handle missing values
-    clean_data = all_data.fillna(method='ffill').fillna(method='bfill')
-    
-    return clean_data
+
+def prepare_portfolio_dataframe(price_df: pd.DataFrame) -> pd.DataFrame:
+    """Clean price data and remove rows that remain unusable."""
+    clean = price_df.copy().replace([np.inf, -np.inf], np.nan)
+    clean = clean.ffill().bfill().dropna(how="all").dropna(axis=1, how="all")
+    if clean.empty:
+        raise ValueError("The price dataset is empty after cleaning.")
+    return clean
+
 
 def compute_returns_covariance(price_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    """
-    Compute daily log returns, mean returns, and covariance matrix.
-    
-    Args:
-        price_df (pd.DataFrame): DataFrame of closing prices
-        
-    Returns:
-        Tuple containing:
-        - pd.DataFrame: Daily log returns
-        - pd.Series: Mean returns
-        - pd.DataFrame: Covariance matrix
-    """
-    # Calculate daily log returns
-    log_returns = np.log(price_df / price_df.shift(1))
-    log_returns = log_returns.dropna()
-    
-    # Calculate mean returns and covariance matrix
-    mean_returns = log_returns.mean()
-    cov_matrix = log_returns.cov()
-    
-    return log_returns, mean_returns, cov_matrix
+    """Compute daily log returns, mean returns and covariance matrix."""
+    log_returns = np.log(price_df / price_df.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+    if log_returns.empty:
+        raise ValueError("Not enough historical observations to calculate returns.")
+    return log_returns, log_returns.mean(), log_returns.cov()
+
+
+def _stable_cholesky(cov_matrix: np.ndarray) -> np.ndarray:
+    """Return a Cholesky factor, adding tiny diagonal jitter when needed."""
+    cov = np.asarray(cov_matrix, dtype=float)
+    cov = (cov + cov.T) / 2
+    jitter = 1e-12
+    for _ in range(8):
+        try:
+            return np.linalg.cholesky(cov + np.eye(cov.shape[0]) * jitter)
+        except np.linalg.LinAlgError:
+            jitter *= 10
+    raise ValueError("The covariance matrix is not positive semi-definite.")
+
 
 def compute_var_cvar(portfolio_returns: pd.Series, alpha: float = 0.05) -> Tuple[float, float]:
-    """
-    Compute Value at Risk (VaR) and Conditional Value at Risk (CVaR) using historical method.
-    
-    Args:
-        portfolio_returns (pd.Series): Historical portfolio returns
-        alpha (float): Confidence level (default: 0.05 for 95% confidence)
-        
-    Returns:
-        Tuple containing:
-        - float: VaR at specified confidence level
-        - float: CVaR at specified confidence level
-    """
-    # Sort returns from worst to best
-    sorted_returns = sorted(portfolio_returns)
-    
-    # Find the index for VaR
-    index = int(np.ceil(alpha * len(sorted_returns))) - 1
-    
-    # Calculate VaR
-    var = -sorted_returns[index]
-    
-    # Calculate CVaR (average of losses beyond VaR)
-    cvar = -np.mean(sorted_returns[:index+1])
-    
-    return var, cvar
+    """Compute positive-loss VaR and CVaR at the requested tail probability."""
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1.")
+    returns = pd.Series(portfolio_returns).dropna().to_numpy(dtype=float)
+    if returns.size == 0:
+        raise ValueError("No portfolio returns available for risk calculation.")
+    var = float(-np.quantile(returns, alpha))
+    tail = returns[returns <= -var]
+    return var, float(-tail.mean()) if tail.size else var
 
-def run_monte_carlo(S0: np.array, mean_returns: np.array, cov_matrix: np.array,
-                   weights: np.array, days: int = 30, iterations: int = 10000,
-                   random_state: int = 42) -> Tuple[np.array, Dict]:
-    """
-    Run Monte Carlo simulation for portfolio returns.
-    
-    Args:
-        S0 (np.array): Initial stock prices
-        mean_returns (np.array): Mean returns for each stock
-        cov_matrix (np.array): Covariance matrix of returns
-        weights (np.array): Portfolio weights
-        days (int): Number of days to simulate
-        iterations (int): Number of simulation iterations
-        random_state (int): Random seed for reproducibility
-        
-    Returns:
-        Tuple containing:
-        - np.array: Array of simulated final portfolio returns
-        - Dict: Summary statistics of the simulation
-    """
-    np.random.seed(random_state)
-    
-    # Initialize array for final portfolio values
-    portfolio_values = np.zeros(iterations)
-    
-    # Cholesky decomposition for correlated random variables
-    L = np.linalg.cholesky(cov_matrix)
-    
-    # Run simulations
-    for i in range(iterations):
-        # Generate correlated random returns
-        Z = np.random.standard_normal(size=(days, len(S0)))
-        corr_returns = np.dot(Z, L.T)
-        
-        # Add drift term
-        daily_returns = mean_returns.values + corr_returns
-        
-        # Calculate path
-        path = np.zeros((days + 1, len(S0)))
-        path[0] = S0
-        
-        for t in range(1, days + 1):
-            path[t] = path[t-1] * np.exp(daily_returns[t-1])
-        
-        # Calculate final portfolio value
-        final_portfolio_value = np.sum(path[-1] * weights)
-        initial_portfolio_value = np.sum(S0 * weights)
-        
-        # Store the return
-        portfolio_values[i] = (final_portfolio_value / initial_portfolio_value) - 1
-    
-    # Calculate summary statistics
-    summary_stats = {
-        'mean': np.mean(portfolio_values),
-        'std': np.std(portfolio_values),
-        'var_95': -np.percentile(portfolio_values, 5),
-        'cvar_95': -np.mean(portfolio_values[portfolio_values <= -np.percentile(portfolio_values, 5)]),
-        'prob_loss_10': np.mean(portfolio_values < -0.10)
-    }
-    
-    return portfolio_values, summary_stats
 
-def predict_future_prices(latest_prices: np.array, mean_returns: np.array, cov_matrix: np.array,
-                         days: int = 252, simulations: int = 1000, random_state: int = 42,
-                         annualization_factor: float = 252) -> Dict:
-    """
-    Predict future stock prices using Monte Carlo simulation with GBM.
-    
-    Args:
-        latest_prices (np.array): Latest available stock prices
-        mean_returns (np.array): Mean returns for each stock
-        cov_matrix (np.array): Covariance matrix of returns
-        days (int): Number of days to predict into future
-        simulations (int): Number of simulation paths
-        random_state (int): Random seed for reproducibility
-        
-    Returns:
-        Dict: Dictionary containing predicted prices and confidence intervals
-    """
-    np.random.seed(random_state)
-    
-    # Time increment (1 for daily)
-    dt = 1
-    
-    # Number of stocks
-    n_stocks = len(latest_prices)
-    
-    # Initialize price paths array
-    prices = np.zeros((simulations, days + 1, n_stocks))
-    prices[:, 0] = latest_prices
-    
-    # Annualize parameters for long-term predictions
-    ann_mean_returns = mean_returns * annualization_factor
-    ann_cov_matrix = cov_matrix * annualization_factor
-    
-    # Cholesky decomposition for correlated random variables
-    L = np.linalg.cholesky(cov_matrix)
-    
-    # Calculate drift and volatility terms
-    drift = ann_mean_returns - 0.5 * np.diag(ann_cov_matrix)
-    
-    for t in range(1, days + 1):
-        # Generate correlated random returns
-        Z = np.random.standard_normal(size=(simulations, n_stocks))
-        corr_returns = np.dot(Z, L.T)
-        
-        # Calculate price paths using Geometric Brownian Motion with time scaling
-        time_scaling = t / annualization_factor
-        prices[:, t] = prices[:, t-1] * np.exp(
-            drift * time_scaling + 
-            np.sqrt(time_scaling) * corr_returns
-        )
-    
-    # Calculate statistics for each stock
-    predictions = {
-        'mean_path': np.mean(prices, axis=0),
-        'upper_95': np.percentile(prices, 95, axis=0),
-        'lower_95': np.percentile(prices, 5, axis=0),
-        'all_paths': prices  # Store some paths for visualization
+def run_monte_carlo(S0: np.ndarray, mean_returns: np.ndarray, cov_matrix: np.ndarray, weights: np.ndarray,
+                    days: int = 30, iterations: int = 10_000, random_state: int = 42) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Simulate correlated GBM portfolio returns and calculate risk statistics."""
+    if days < 1 or iterations < 100:
+        raise ValueError("days must be >= 1 and iterations must be >= 100.")
+    prices = np.asarray(S0, dtype=float)
+    mu = np.asarray(mean_returns, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if prices.ndim != 1 or mu.shape != prices.shape or weights.shape != prices.shape:
+        raise ValueError("S0, mean_returns and weights must have matching shapes.")
+    if weights.sum() <= 0:
+        raise ValueError("Portfolio weights must contain a positive total.")
+    weights = weights / weights.sum()
+    chol = _stable_cholesky(np.asarray(cov_matrix, dtype=float))
+    rng = np.random.default_rng(random_state)
+    z = rng.standard_normal((iterations, days, len(prices)))
+    cumulative_log_returns = (mu + z @ chol.T).sum(axis=1)
+    final_prices = prices * np.exp(cumulative_log_returns)
+    initial_value = float(prices @ weights)
+    portfolio_returns = (final_prices @ weights) / initial_value - 1.0
+    var_95 = float(-np.quantile(portfolio_returns, 0.05))
+    tail = portfolio_returns[portfolio_returns <= -var_95]
+    stats = {
+        "mean": float(portfolio_returns.mean()),
+        "std": float(portfolio_returns.std()),
+        "var_95": var_95,
+        "cvar_95": float(-tail.mean()) if tail.size else var_95,
+        "prob_loss_10": float(np.mean(portfolio_returns < -0.10)),
     }
-    
-    return predictions
+    return portfolio_returns, stats
+
+
+def predict_future_prices(latest_prices: np.ndarray, mean_returns: np.ndarray, cov_matrix: np.ndarray,
+                          days: int = 252, simulations: int = 1_000, random_state: int = 42,
+                          annualization_factor: float = 252) -> Dict[str, np.ndarray]:
+    """Generate correlated GBM price paths with 5th and 95th percentile bands."""
+    if days < 1 or simulations < 100:
+        raise ValueError("days must be >= 1 and simulations must be >= 100.")
+    latest = np.asarray(latest_prices, dtype=float)
+    mu = np.asarray(mean_returns, dtype=float)
+    cov = np.asarray(cov_matrix, dtype=float)
+    n_stocks = len(latest)
+    if mu.shape != (n_stocks,) or cov.shape != (n_stocks, n_stocks):
+        raise ValueError("Prediction inputs have incompatible shapes.")
+    chol = _stable_cholesky(cov)
+    rng = np.random.default_rng(random_state)
+    dt = 1.0 / annualization_factor
+    daily_drift = mu - 0.5 * np.diag(cov)
+    prices = np.empty((simulations, days + 1, n_stocks), dtype=float)
+    prices[:, 0, :] = latest
+    for day in range(1, days + 1):
+        shocks = rng.standard_normal((simulations, n_stocks)) @ chol.T
+        step = np.exp(daily_drift * dt + shocks * np.sqrt(dt))
+        prices[:, day, :] = prices[:, day - 1, :] * step
+    return {
+        "mean_path": prices.mean(axis=0),
+        "upper_95": np.percentile(prices, 95, axis=0),
+        "lower_95": np.percentile(prices, 5, axis=0),
+    }
+
 
 def save_artifacts(model_obj: Dict, scaler: object, price_df: pd.DataFrame) -> None:
-    """
-    Save model artifacts to disk.
-    
-    Args:
-        model_obj (Dict): Dictionary containing model metadata and parameters
-        scaler (object): Fitted scaler object
-        price_df (pd.DataFrame): Price data DataFrame
-    """
-    # Create directories if they don't exist
-    Path('models').mkdir(exist_ok=True)
-    Path('data').mkdir(exist_ok=True)
-    
-    # Save model object
-    joblib.dump(model_obj, 'models/portfolio_model.pkl')
-    
-    # Save scaler if provided
+    """Persist model metadata and historical prices."""
+    MODEL_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(exist_ok=True)
+    joblib.dump(model_obj, MODEL_PATH)
     if scaler is not None:
-        joblib.dump(scaler, 'models/scaler.pkl')
-    
-    # Save price data
-    price_df.to_csv('data/portfolio_data.csv')
+        joblib.dump(scaler, SCALER_PATH)
+    price_df.to_csv(PRICE_PATH)
+
 
 def load_artifacts() -> Tuple[Dict, object, pd.DataFrame]:
-    """
-    Load saved model artifacts from disk.
-    
-    Returns:
-        Tuple containing:
-        - Dict: Model object with metadata and parameters
-        - object: Fitted scaler object
-        - pd.DataFrame: Price data DataFrame
-    """
-    try:
-        model_obj = joblib.load('models/portfolio_model.pkl')
-        scaler = joblib.load('models/scaler.pkl')
-        price_df = pd.read_csv('data/portfolio_data.csv', index_col=0, parse_dates=True)
-        return model_obj, scaler, price_df
-    except Exception as e:
-        raise RuntimeError(f"Error loading artifacts: {str(e)}")
+    """Load saved artifacts and historical prices."""
+    missing = [str(path) for path in (MODEL_PATH, PRICE_PATH) if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Missing artifacts: " + ", ".join(missing))
+    model_obj = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH) if SCALER_PATH.exists() else None
+    price_df = pd.read_csv(PRICE_PATH, index_col=0, parse_dates=True)
+    return model_obj, scaler, prepare_portfolio_dataframe(price_df)
