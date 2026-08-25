@@ -1,32 +1,25 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-*.so
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# Virtual environment
+# Virtual environments
 venv/
 env/
-.env/
+.venv/
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
+Thumbs.db
 
-# Project specific
+# Generated model artifacts
 models/*.pkl
 data/*.csv
 data/training_summary.json
-.ipynb_checkpoints/
 
-# System
-.DS_Store
-Thumbs.db
+# Notebooks
+.ipynb_checkpoints/
