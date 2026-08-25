@@ -1,133 +1,84 @@
-# Stock Portfolio Risk Analysis with Monte Carlo Simulation
+# 📊 Stock Portfolio Risk Analysis
 
-Real-time portfolio risk analysis using Monte Carlo simulation, with interactive visualization dashboard powered by Streamlit.
+> **A probabilistic risk analytics dashboard for Indian equity portfolios.**
+>
+> Analyze historical risk, portfolio correlation and future uncertainty using **Monte Carlo simulation + Geometric Brownian Motion (GBM)**.
 
-## Features
+## ✨ What this project does
 
-- Fetches real-time stock data from Yahoo Finance (Indian stocks: RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS, ITC.NS)
-- Calculates key risk metrics:
-  - Value at Risk (VaR) at 95% confidence level
-  - Conditional Value at Risk (CVaR)
-  - Probability of significant losses (>10%)
-- Monte Carlo simulation (10,000 iterations) for future portfolio performance
-- Interactive Streamlit dashboard with Plotly visualizations
-- Export functionality for risk reports
-- Real-time data updates and customizable parameters
+- 📈 Pulls market prices from **Yahoo Finance** for NSE stocks
+- 🧮 Calculates **VaR, CVaR, volatility and loss probability**
+- 🎲 Runs configurable **Monte Carlo portfolio simulations**
+- 🧩 Visualizes **return correlations** between holdings
+- 🔮 Generates probabilistic **future price forecasts** with 95% uncertainty bands
+- 📥 Exports risk results as CSV
+- 🎨 Provides a polished **Streamlit analytics dashboard**
 
-## Quick Start
+## 🛠️ Tech Stack
 
-### Running in Google Colab
+| Layer | Technology |
+|---|---|
+| Language | Python |
+| Dashboard | Streamlit |
+| Data | yfinance, pandas, NumPy |
+| Statistics | SciPy |
+| Simulation | Monte Carlo, GBM |
+| Visualization | Plotly |
+| ML Utilities | scikit-learn, joblib |
 
-1. Upload all files to your Google Drive
-2. Open the notebook in Colab and mount your Drive:
-```python
-from google.colab import drive
-drive.mount('/content/drive')
+## 📁 Project Structure
+
+```text
+Stock-Portfolio-Risk-Probability/
+├── app.py                 # Streamlit dashboard
+├── model_utils.py         # Data, risk and simulation utilities
+├── train_model.py         # Reproducible training/artifact pipeline
+├── requirements.txt       # Python dependencies
+├── .gitignore             # Repository exclusions
+├── data/                  # Generated market data / summaries
+└── models/                # Generated model artifacts
 ```
 
-3. Install requirements:
-```bash
-!pip install -r requirements.txt
-```
+> `data/` and `models/` artifacts are intentionally ignored by Git because they are generated locally or during deployment.
 
-4. Train the model:
-```bash
-!python train_model.py
-```
+## 🚀 Run locally
 
-5. Launch Streamlit app (after downloading artifacts):
 ```bash
-!streamlit run app.py
-```
-
-### Local Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/your-username/stock-portfolio-risk-analysis.git
-cd stock-portfolio-risk-analysis
-```
-
-2. Install dependencies:
-```bash
+git clone https://github.com/KAVYA-29-ai/Stock-Portfolio-Risk-Probability.git
+cd Stock-Portfolio-Risk-Probability
 pip install -r requirements.txt
-```
-
-3. Train the model:
-```bash
-python train_model.py
-```
-
-4. Run the Streamlit app:
-```bash
 streamlit run app.py
 ```
 
-### Deployment on Hugging Face Spaces
+The dashboard fetches market data directly, so a pre-generated model file is **not required** just to explore the application.
 
-1. Create a new Space on Hugging Face (https://huggingface.co/spaces)
-2. Choose "Streamlit" as the SDK
-3. Link your GitHub repository
-4. Add the following to your Space's settings:
-   - Python dependencies: Copy contents of requirements.txt
-   - Repository URL: Your GitHub repo URL
-   - Additional environment variables (if needed)
+### Optional: generate artifacts
 
-## Project Structure
-
-```
-stock-portfolio-risk-analysis/
-├── app.py                    # Streamlit dashboard application
-├── train_model.py           # Model training script
-├── model_utils.py           # Helper functions and utilities
-├── requirements.txt         # Project dependencies
-├── README.md               # Project documentation
-├── .gitignore             # Git ignore rules
-├── models/                # Saved model artifacts
-│   ├── portfolio_model.pkl   
-│   └── scaler.pkl            
-└── data/                  # Data directory
-    └── portfolio_data.csv    
+```bash
+python train_model.py
+streamlit run app.py
 ```
 
-## Example Usage
+## 📊 Risk Metrics
 
-After running the model training:
+**Value at Risk (VaR)** estimates the loss threshold for a selected confidence level.
 
-```python
-# Sample risk metrics output:
-95% VaR: -0.0842 (8.42% maximum loss with 95% confidence)
-95% CVaR: -0.1123 (11.23% expected loss in worst 5% scenarios)
-Probability of >10% loss (30 days): 0.0891 (8.91% chance)
-```
+**Conditional Value at Risk (CVaR)** measures the average loss in the worst tail beyond VaR.
 
-## Troubleshooting
+**Monte Carlo simulation** generates thousands of correlated portfolio outcomes from historical return and covariance estimates.
 
-1. Yahoo Finance data issues:
-   - Ensure internet connectivity
-   - Verify ticker symbols are correct (use .NS suffix for NSE stocks)
-   - Try reducing data fetch frequency
+**GBM forecasting** produces probabilistic price paths rather than presenting a single deterministic prediction.
 
-2. Model artifacts not found:
-   - Run train_model.py first
-   - Check models/ directory exists
-   - Verify write permissions
+## ⚠️ Important Note
 
-3. Streamlit app issues:
-   - Confirm all dependencies are installed
-   - Check port availability
-   - Verify data files are in correct locations
+This project is an educational quantitative-finance application. Its simulations are based on historical statistical assumptions and **are not financial advice or guaranteed predictions of market performance**.
 
-## Contributing
+## 👤 Author
 
-Pull requests are welcome! For major changes, please open an issue first.
+**KAVYA-29-ai**
 
-## License
+Built as a hands-on project exploring **Python, quantitative risk analysis, financial modeling and data visualization**.
 
-MIT
+## 📄 License
 
-## Acknowledgments
-
-- yfinance for market data access
-- Streamlit for the interactive dashboard framework
-- Plotly for interactive visualizations
+MIT License
